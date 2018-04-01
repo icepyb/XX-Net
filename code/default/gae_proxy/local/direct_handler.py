@@ -34,7 +34,7 @@ def send_header(wfile, keyword, value):
         wfile.write("%s: %s\r\n" % (keyword, value))
 
 
-def handler(method, host, path, headers, body, wfile, timeout=30):
+def handler(method, host, path, headers, body, wfile, timeout=60):
     time_request = time.time()
 
     if "Connection" in headers and headers["Connection"] == "close":
@@ -49,15 +49,18 @@ def handler(method, host, path, headers, body, wfile, timeout=30):
         try:
             response = direct_front.request(method, host, path, headers, body, timeout=time_left)
             if response:
-                if response.status > 400:
+                if response.status > 600:
+                    xlog.warn("direct %s %s % status:%d", method, host, path, response.status)
+                    continue
+                elif response.status > 400:
                     server_type = response.headers.get('Server', "")
 
                     if "G" not in server_type and "g" not in server_type and server_type not in google_server_types:
+
                         xlog.warn("IP:%s host:%s not support GAE, server type:%s status:%d",
                                   response.ssl_sock.ip, host, server_type, response.status)
                         direct_front.ip_manager.report_connect_fail(response.ssl_sock.ip, force_remove=True)
                         response.worker.close()
-                        response.close()
                         continue
                 break
         except OpenSSL.SSL.SysCallError as e:
@@ -67,9 +70,18 @@ def handler(method, host, path, headers, body, wfile, timeout=30):
             errors.append(e)
             xlog.exception('direct_handler.handler %r %s %s , retry...', e, host, path)
 
+    response_headers = {}
+    for key, value in response.headers.items():
+        key = key.title()
+        response_headers[key] = value
+
+    response_headers["Persist"] = ""
+    response_headers["Connection"] = "Persist"
+
     try:
         wfile.write("HTTP/1.1 %d %s\r\n" % (response.status, response.reason))
-        for key, value in response.headers.items():
+        for key in response_headers:
+            value = response_headers[key]
             send_header(wfile, key, value)
         wfile.write("\r\n")
         wfile.flush()
@@ -80,21 +92,22 @@ def handler(method, host, path, headers, body, wfile, timeout=30):
             if isinstance(data, memoryview):
                 data = data.tobytes()
 
-            length += len(data)
+            data_len = len(data)
+            length += data_len
             if 'Transfer-Encoding' in response.headers:
-                if not data:
-                    wfile.write('0\r\n\r\n')
+                if not data_len:
+                    wfile._sock.sendall('0\r\n\r\n')
                     break
-                wfile.write('%x\r\n' % len(data))
-                wfile.write(data)
-                wfile.write('\r\n')
+                wfile._sock.sendall('%x\r\n' % data_len)
+                wfile._sock.sendall(data)
+                wfile._sock.sendall('\r\n')
             else:
-                if not data:
+                if not data_len:
                     break
                 wfile._sock.sendall(data)
 
         xlog.info("DIRECT t:%d s:%d %d %s %s",
                   (time.time()-time_request)*1000, length, response.status, host, path)
     except Exception as e:
-        xlog.info("DIRECT %d %s %s, t:%d send to client except:%r",
+        xlog.warn("DIRECT %d %s %s, t:%d send to client except:%r",
                   response.status, host, path, (time.time()-time_request)*1000, e)

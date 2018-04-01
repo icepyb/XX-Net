@@ -53,6 +53,8 @@ class HttpsDispatcher(object):
         self.h1_num = 0
         self.h2_num = 0
         self.last_request_time = time.time()
+        self.task_count_lock = threading.Lock()
+        self.task_count = 0
         self.running = True
 
         # for statistic
@@ -172,6 +174,7 @@ class HttpsDispatcher(object):
             if len(self.workers) < self.config.dispather_max_workers and \
                     (best_worker is None or
                     idle_num < self.config.dispather_min_idle_workers or
+                    len(self.workers) < self.config.dispather_min_workers or
                     (now - best_worker.last_active_time) < self.config.dispather_work_min_idle_time or
                     best_score > self.config.dispather_work_max_score or
                      (best_worker.version == "2" and len(best_worker.streams) >= self.config.http2_target_concurrent)):
@@ -209,7 +212,7 @@ class HttpsDispatcher(object):
                     slowest_score = score
                     slowest_worker = worker
 
-            if idle_num < 10 or \
+            if idle_num < self.config.dispather_max_idle_workers or \
                     idle_num < int(len(self.workers) * 0.3) or \
                     len(self.workers) < self.config.dispather_max_workers:
                 return
@@ -219,26 +222,38 @@ class HttpsDispatcher(object):
             self.close_cb(slowest_worker)
 
     def request(self, method, host, path, headers, body, url="", timeout=60):
-        # self.logger.debug("task start request")
-        if not url:
-            url = "%s %s%s" % (method, host, path)
-        self.last_request_time = time.time()
-        q = simple_queue.Queue()
-        task = http_common.Task(self.logger, self.config, method, host, path, headers, body, q, url, timeout)
-        task.set_state("start_request")
-        self.request_queue.put(task)
+        if self.task_count > self.config.max_task_num:
+            self.logger.warn("task num exceed")
+            time.sleep(1)
+            return None
 
-        response = q.get(timeout=timeout)
-        if response and response.status==200:
-            self.success_num += 1
-            self.continue_fail_num = 0
-        else:
-            self.fail_num += 1
-            self.continue_fail_num += 1
-            self.last_fail_time = time.time()
+        with self.task_count_lock:
+            self.task_count += 1
 
-        task.set_state("get_response")
-        return response
+        try:
+            # self.logger.debug("task start request")
+            if not url:
+                url = "%s %s%s" % (method, host, path)
+            self.last_request_time = time.time()
+            q = simple_queue.Queue()
+            task = http_common.Task(self.logger, self.config, method, host, path, headers, body, q, url, timeout)
+            task.set_state("start_request")
+            self.request_queue.put(task)
+
+            response = q.get(timeout=timeout)
+            if response and response.status==200:
+                self.success_num += 1
+                self.continue_fail_num = 0
+            else:
+                self.fail_num += 1
+                self.continue_fail_num += 1
+                self.last_fail_time = time.time()
+
+            task.set_state("get_response")
+            return response
+        finally:
+            with self.task_count_lock:
+                self.task_count -= 1
 
     def retry_task_cb(self, task, reason=""):
         self.fail_num += 1
@@ -394,8 +409,8 @@ class HttpsDispatcher(object):
 
         out_str = 'thread num:%d\r\n' % threading.activeCount()
         for w, r in w_r:
-            out_str += "%s rtt:%d running:%d accept:%d live:%d inactive:%d processed:%d" % \
-                       (w.ip, w.rtt, w.keep_running,  w.accept_task,
+            out_str += "%s score:%d rtt:%d running:%d accept:%d live:%d inactive:%d processed:%d" % \
+                       (w.ip, w.get_score(), w.rtt, w.keep_running,  w.accept_task,
                         (now-w.ssl_sock.create_time), (now-w.last_active_time), w.processed_tasks)
             if w.version == "2":
                 out_str += " continue_timeout:%d streams:%d ping_on_way:%d remote_win:%d send_queue:%d\r\n" % \

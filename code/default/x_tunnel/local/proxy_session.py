@@ -1,7 +1,7 @@
 import time
 import json
 import threading
-import struct
+import xstruct as struct
 
 from xlog import getLogger
 xlog = getLogger("x_tunnel")
@@ -159,7 +159,7 @@ class ProxySession():
             return
 
         stat = self.get_stat("minute")
-        stat["version"] = g.xxnet_version()
+        stat["version"] = g.xxnet_version
         stat["global"]["timeout"] = g.stat["timeout_roundtrip"] - self.last_state["timeout"]
         stat["global"]["ipv6"] = check_local_network.IPv6.is_ok()
         stat["tls_relay_front"]["ip_dict"] = g.tls_relay_front.ip_manager.ip_dict
@@ -200,6 +200,14 @@ class ProxySession():
             name = front.name
             dispatcher = front.get_dispatcher()
             if not dispatcher:
+                res[name] = {
+                    "score": "False",
+                    "rtt": 9999,
+                    "success_num": 0,
+                    "fail_num": 0,
+                    "worker_num": 0,
+                    "total_traffics": "Up: 0 / Down: 0"
+                }
                 continue
             score = dispatcher.get_score()
             if score is None:
@@ -455,7 +463,7 @@ class ProxySession():
                 force = True
 
             if self.server_send_buf_size:
-                self.server_send_buf_size -= g.config.max_payload
+                self.server_send_buf_size -= g.config.max_payload /4
                 self.server_send_buf_size = max(0, self.server_send_buf_size)
                 force = True
 
@@ -733,11 +741,10 @@ def call_api(path, req_info):
         path = "/" + path
 
     try:
-        start_time = time.time()
         upload_post_data = json.dumps(req_info)
-
         upload_post_data = encrypt_data(upload_post_data)
 
+        start_time = time.time()
         while time.time() - start_time < 30:
             content, status, response = g.http_client.request(method="POST", host=g.config.api_server, path=path,
                                                      headers={"Content-Type": "application/json"},

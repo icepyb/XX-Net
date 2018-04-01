@@ -56,7 +56,7 @@ response:
 
 import errno
 import time
-import struct
+import xstruct as struct
 import re
 import string
 import ssl
@@ -146,8 +146,8 @@ skip_headers = frozenset(['Vary',
                           'Proxy-Connection',
                           'Upgrade',
                           'X-Chrome-Variations',
-                          'Connection',
-                          'Cache-Control'
+                          #'Connection',
+                          #'Cache-Control'
                           ])
 
 
@@ -194,7 +194,7 @@ def return_fail_message(wfile):
     return
 
 
-def pack_request(method, url, headers, body):
+def pack_request(method, url, headers, body, timeout):
     headers = dict(headers)
     if isinstance(body, basestring) and body:
         if len(body) < 10 * 1024 * 1024 and 'Content-Encoding' not in headers:
@@ -222,7 +222,7 @@ def pack_request(method, url, headers, body):
         kwargs['maxsize'] = front.config.JS_MAXSIZE
     else:
         kwargs['maxsize'] = front.config.AUTORANGE_MAXSIZE
-    kwargs['timeout'] = '19'
+    kwargs['timeout'] = str(timeout)
     # gae 用的参数　ｅｎｄ
 
     payload = '%s %s HTTP/1.1\r\n' % (method, url)
@@ -248,6 +248,9 @@ def unpack_response(response):
         data = response.task.read(size=2)
         if not data:
             raise GAE_Exception(600, "get protocol head fail")
+
+        if len(data) !=2:
+            raise GAE_Exception(600, "get protocol head fail, data:%s, len:%d" % (data, len(data)))
 
         headers_length, = struct.unpack('!h', data)
         data = response.task.read(size=headers_length)
@@ -334,7 +337,7 @@ def request_gae_server(headers, body, url, timeout):
     return response
 
 
-def request_gae_proxy(method, url, headers, body, timeout=30, retry=True):
+def request_gae_proxy(method, url, headers, body, timeout=None):
     headers = dict(headers)
     # make retry and time out
     time_request = time.time()
@@ -372,16 +375,15 @@ def request_gae_proxy(method, url, headers, body, timeout=30, retry=True):
     else:
         del headers["Accept-Encoding"]
 
-    request_headers, request_body = pack_request(method, url, headers, body)
     error_msg = []
 
-    while True:
-        if time.time() - time_request > timeout:
-            raise GAE_Exception(600, b"".join(error_msg))
+    if not timeout:
+        timeouts = [5, 20, 30]
+    else:
+        timeouts = [timeout]
 
-        if not retry and error_msg:
-            raise GAE_Exception(600, b"".join(error_msg))
-
+    for timeout in timeouts:
+        request_headers, request_body = pack_request(method, url, headers, body, timeout)
         try:
             response = request_gae_server(request_headers, request_body, url, timeout)
 
@@ -428,6 +430,8 @@ def request_gae_proxy(method, url, headers, body, timeout=30, retry=True):
             err_msg = 'gae_handler.handler %r %s , retry...' % (e, url)
             error_msg.append(err_msg)
             xlog.exception('gae_handler.handler %r %s , retry...', e, url)
+
+    raise GAE_Exception(600, b"".join(error_msg))
 
 
 def handler(method, url, headers, body, wfile):
@@ -517,6 +521,9 @@ def handler(method, url, headers, body, wfile):
             continue
         response_headers[key] = value
 
+    response_headers["Persist"] = ""
+    response_headers["Connection"] = "Persist"
+
     if 'X-Head-Content-Length' in response_headers:
         if method == "HEAD":
             response_headers['Content-Length'] = response_headers['X-Head-Content-Length']
@@ -568,7 +575,7 @@ def handler(method, url, headers, body, wfile):
             # https 包装
             ret = wfile._sock.sendall(data)
             if ret == ssl.SSL_ERROR_WANT_WRITE or ret == ssl.SSL_ERROR_WANT_READ:
-                xlog.debug("send to browser wfile.write ret:%d", ret)
+                #xlog.debug("send to browser wfile.write ret:%d", ret)
                 #ret = wfile.write(data)
                 wfile._sock.sendall(data)
         except Exception as e_b:
@@ -656,6 +663,9 @@ class RangeFetch2(object):
             response_headers['Content-Length'] = str(
                 self.req_end - res_begin + 1)
             state_code = 206
+
+        response_headers["Persist"] = ""
+        response_headers["Connection"] = "Persist"
 
         xlog.info('RangeFetch %d-%d started(%r) ',
                   res_begin, self.req_end, self.url)
@@ -804,8 +814,8 @@ class RangeFetch2(object):
 
                 data = response.task.read()
                 if not data:
-                    xlog.warn("RangeFetch [%s] get body fail %s",
-                              response.ssl_sock.ip, self.url)
+                    xlog.warn("RangeFetch [%s] get body fail, begin:%d %s",
+                              response.ssl_sock.ip, begin, self.url)
                     break
 
                 data_len = len(data)

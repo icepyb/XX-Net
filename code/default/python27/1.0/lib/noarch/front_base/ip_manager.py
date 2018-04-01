@@ -83,10 +83,12 @@ class IpManager():
         self.ip_lock = threading.Lock()
         self.reset()
 
+        self.check_ip_thread = threading.Thread(target=self.check_ip_process)
+        self.check_ip_thread.daemon = True
+        self.check_ip_thread.start()
+
         if config.check_exist_ip_on_startup:
-            self.check_ip_thread = threading.Thread(target=self.check_ip_process)
-            self.check_ip_thread.daemon = True
-            self.check_ip_thread.start()
+            self.scan_all_exist_ip()
 
     def reset(self):
         self.ip_lock.acquire()
@@ -228,6 +230,7 @@ class IpManager():
             self.good_ipv4_num += num
         else:
             self.good_ipv6_num += num
+        self.good_ip_num += num
 
     def try_sort_ip(self, force=False):
         if time.time() - self.last_sort_time < 10 and not force:
@@ -241,12 +244,16 @@ class IpManager():
             self.good_ipv6_num = 0
             ip_rate = {}
             for ip in self.ip_dict:
+                if "." in ip and self.config.use_ipv6 == "force_ipv6":
+                    continue
+                elif ":" in ip and self.config.use_ipv6 == "force_ipv4":
+                    continue
+
                 if 'gws' not in self.ip_dict[ip]['server']:
                     continue
                 ip_rate[ip] = self._ip_rate(self.ip_dict[ip])
                 if self.ip_dict[ip]['fail_times'] == 0:
                     self._add_ip_num(ip, 1)
-                    self.good_ip_num += 1
 
             ip_time = sorted(ip_rate.items(), key=operator.itemgetter(1))
             self.ip_list = [ip for ip, rate in ip_time]
@@ -269,7 +276,11 @@ class IpManager():
             scan_ip_thread_num = self.config.max_scan_ip_thread_num
         else:
             try:
-                last_ip = self.ip_list[-1]
+                if len(self.ip_list) > 100:
+                    last_ip = self.ip_list[100]
+                else:
+                    last_ip = self.ip_list[-1]
+
                 last_ip_handshake_time = self._ip_rate(self.ip_dict[last_ip])
                 scan_ip_thread_num = int( (last_ip_handshake_time - self.config.target_handshake_time)/2 * self.config.max_scan_ip_thread_num/50 )
             except Exception as e:
@@ -392,13 +403,11 @@ class IpManager():
                 self.ip_dict[ip]['fail_times'] = fail_times
                 if self.ip_dict[ip]['fail_time'] > 0:
                     self.ip_dict[ip]['fail_time'] = 0
-                    self.good_ip_num += 1
                     self._add_ip_num(ip, 1)
                 self.append_ip_history(ip, handshake_time)
                 return False
 
             self.iplist_need_save = True
-            self.good_ip_num += 1
             self._add_ip_num(ip, 1)
 
             self.ip_dict[ip] = {'handshake_time':handshake_time, "fail_times":fail_times,
@@ -421,7 +430,7 @@ class IpManager():
 
     def update_ip(self, ip, handshake_time):
         if not isinstance(ip, basestring):
-            self.logger.error("set_ip input")
+            self.logger.error("update_ip input error:%s", ip)
             return
 
         handshake_time = int(handshake_time)
@@ -449,7 +458,6 @@ class IpManager():
 
                 self.ip_dict[ip]['success_time'] = time_now
                 if self.ip_dict[ip]['fail_times'] > 0:
-                    self.good_ip_num += 1
                     self._add_ip_num(ip, 1)
                 self.ip_dict[ip]['fail_times'] = 0
                 self.append_ip_history(ip, handshake_time)
@@ -475,7 +483,6 @@ class IpManager():
 
             if force_remove:
                 if self.ip_dict[ip]['fail_times'] == 0:
-                    self.good_ip_num -= 1
                     self._add_ip_num(ip, -1)
                 del self.ip_dict[ip]
 
@@ -490,7 +497,7 @@ class IpManager():
 
             self.check_local_network.report_fail(ip)
             # ignore if system network is disconnected.
-            if not self.check_local_network.is_ok():
+            if not self.check_local_network.is_ok(ip):
                 self.logger.debug("report_connect_fail network fail")
                 return
 
@@ -500,7 +507,6 @@ class IpManager():
                 return
 
             if self.ip_dict[ip]['fail_times'] == 0:
-                self.good_ip_num -= 1
                 self._add_ip_num(ip, -1)
             self.ip_dict[ip]['fail_times'] += 1
             self.append_ip_history(ip, "fail")
@@ -530,7 +536,6 @@ class IpManager():
                 return
 
             if self.ip_dict[ip]['down_fail'] == 0:
-                self.good_ip_num -= 1
                 self._add_ip_num(ip, -1)
 
             self.ip_dict[ip]['down_fail'] += 1
@@ -571,7 +576,6 @@ class IpManager():
                 try:
                     if self.ip_dict[ip]['fail_times']:
                         self.ip_dict[ip]['fail_times'] = 0
-                        self.good_ip_num += 1
                         self._add_ip_num(ip, 1)
                 except:
                     pass
@@ -638,7 +642,6 @@ class IpManager():
 
     def scan_ip_worker(self):
         while self.scan_thread_count <= self.scan_ip_thread_num and self.running:
-
             try:
                 time.sleep(1)
                 ip = self.ip_source.get_ip()
@@ -661,7 +664,7 @@ class IpManager():
                     self.remove_slowest_ip()
                     self.save()
             except Exception as e:
-                self.logger.exception("google_ip.runJob fail:%r", e)
+                self.logger.exception("scan_ip_worker except:%r", e)
 
         self.scan_thread_lock.acquire()
         self.scan_thread_count -= 1
@@ -736,7 +739,6 @@ class IpManager():
                         continue
 
                     if self.ip_dict[ip]['fail_times'] == 0:
-                        self.good_ip_num -= 1
                         self._add_ip_num(ip, -1)
                     self.ip_dict[ip]['fail_times'] += 1
                     self.ip_dict[ip]["fail_time"] = time.time()
